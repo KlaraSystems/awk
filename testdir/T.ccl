@@ -146,6 +146,139 @@ chk '[a-c\u110000-\u110001]'	abc	'a bad range must not add a stray -'
 chk '[\u110000-\u110001\u110002-\u110003]'	''	'every range bad, so match nothing'
 chk '[z-a\u110000-\u110001]'	''	'a bad range poisons an otherwise nullable one'
 
+# A collating element or equivalence class holding a metacharacter.
+chk '[a[.-.]f]'		'af-'		'- was read as a range separator: a-f'
+chk '[a[=-=]f]'		'af-'		'- was read as a range separator: a-f'
+chk '[[.-.]]'		-		''
+chk '[[=-=]]'		-		''
+chk '[[.\.]]'		'\'		'\ ate the terminator; class matched everything'
+chk '[[=\=]]'		'\'		'\ ate the terminator; class matched everything'
+chk '[a[.\.]n]'		'an\'		'\ was dropped from the class'
+chk '[a[=\=]n]'		'an\'		'\ was dropped from the class'
+chk '[a[.b.]c]'		abc		'b was dropped from the class'
+
+# Collating elements as range endpoints.
+chk '[[.a.]-[.f.]]'	abcdef		'the range was never built'
+chk '[[.a.]-f]'		abcdef		'the range was never built'
+chk '[a-[.f.]]'		abcdef		'the range was never built'
+chk '[^[.0.]-[.9.]]'	"$ALPHA$PUNCT"	'the negated range was never built'
+
+# A collating element or equivalence class, by contrast, is a single
+# character and may end a range.
+#
+chk '[a[.c.]-e]'	'acde'	'[.c.] is a member, then c-e is a range'
+chk '[a-[.c.]]'		abc	'a collating element closes a range'
+chk '[[=a=]-[=c=]]'	abc	'equivalence classes as endpoints; gawk rejects this'
+
+# Under LC_ALL=C every character is its own equivalence class.
+chk '[[=a=]]'	a	'C locale: [=a=] is just a'
+chk '[[=a=][=c=]]'	ac	'C locale: two single-member classes'
+chk '[\000[=a=]]'	a	'a dropped NUL must not swallow the class after it'
+chk '[a\000[=c=]]'	ac	'a NUL between two members must not swallow the one after it'
+chk '[^[=a=]]'	"bcdefgnqxyzABCFG0125789-=[]:.\!"	'C locale: negated single-member class'
+
+# An escaped hyphen is a member, not a range separator.
+# gawk disagrees for the numeric spellings: it resolves \x2d and \055 before
+# the regexp parser runs, so there they act as separators.  onetrueawk treats
+# all three spellings alike.
+#
+chk '[a\-f]'		'af-'		''
+chk '[a\x2df]'		'af-'		'became the range a-f'
+chk '[a\055f]'		'af-'		'became the range a-f'
+
+# A backslash as an ordinary member.
+chk '[a\\]'		'a\'		'\ was dropped, and over-read past the buffer'
+chk '[\\n]'		'n\'		'became {newline}'
+chk '[\x5cn]'		'n\'		'gawk reads \x5c differently'
+
+# Character classes, for contrast.
+chk '[[:alpha:]]'	"$ALPHA"	''
+chk '[[:digit:]]'	"$DIGIT"	''
+chk '[[:graph:]]'	"$ALL"		'the class array was left unterminated'
+
+# bad_re <regexp> <note>
+#
+# bad_re checks that a bracket expression is rejected as a syntax error.
+#
+# It must not crash on the way.
+#
+bad_re() {
+	nt=`expr $nt + 1`
+	$awk '/'"$1"'/ { print }' $data >/dev/null 2>&1
+	status=$?
+	if [ $status -eq 0 ]; then
+		echo "BAD: T.ccl $nt: /$1/ was accepted, expected a syntax error ($2)"
+		bad=`expr $bad + 1`
+	elif [ $status -ge 128 ]; then
+		echo "BAD: T.ccl $nt: /$1/ died on signal $status ($2)"
+		bad=`expr $bad + 1`
+	fi
+}
+
+# Malformed class names are errors, not silently-empty classes.
+# gawk rejects all three of these too.
+#
+bad_re '[[:]'		'was accepted as the literal set {[,:}'
+bad_re '[[:foo:]]'	'was accepted and matched nothing'
+bad_re '[a[:alpha]b]'	'was accepted and matched nothing'
+bad_re '[[.x]'		'unterminated collating element'
+bad_re '[[=x]'		'unterminated equivalence class'
+
+# Another buffer boundary, silent in the same way: cclex()'s
+# ordinary-character, multi-byte and terminator writes never called adjbuf(),
+# so they ran off the end of whatever slack a [:class:] expansion left inside
+# adjbuf()'s 100-byte quantum.  Adding padding also raises the initial
+# reservation, so the window where it overflows is bounded on both sides.
+# Where it sits depends on how many characters [:print:] expands to in the
+# current locale -- 5 in C, 10-34 in en_US.UTF-8, 23-41 in en_US.ISO8859-1 --
+# and on the C side's own numbers: bufsz starts at 100, the reservation at
+# entry is 5 * strlen(), and adjbuf() rounds growth up to 100.  Change any of
+# those and the window may move outside this sweep; since every case passes
+# once the bug is fixed, that would lose the coverage silently.  Hence the
+# sweep, and hence its width.
+#
+pad=
+i=1
+while [ $i -le 44 ]
+do
+	pad="${pad}a"
+	chk "[[:print:]$pad]" "$ALL" 'ran past the cclex() buffer'
+	i=`expr $i + 1`
+done
+
+# The multi-byte path copies up to four unchecked bytes per pass, so it leaves
+# the buffer sooner and from a different write.
+#
+pad=
+i=1
+while [ $i -le 16 ]
+do
+	pad="${pad}一"
+	chk "[[:print:]$pad]" "$ALL" 'multi-byte copy ran past the cclex() buffer'
+	i=`expr $i + 1`
+done
+
+# KNOWN \uG, and pre-existing: HAT is NCHARS+2 == 1261 == U+04ED, and
+# makedfa() seeds the start state with cgoto(f, 2, HAT).  A class holding
+# that one code point therefore answers member(HAT) yes, the leaf goes live
+# in the start state, and the regexp matches everywhere.  U+04ED is the only
+# colliding value in 1..2000.  gawk gets all three of these right; these
+# cases record what we do, they do not assert that it is correct.
+#
+chk '[\u04ec]'	''	'the neighbor below the old HAT value'
+chk '[\u04ee]'	''	'the neighbor above the old HAT value'
+chk '[\u04ed]'	''	'was HAT, so the class matched every line'
+chk '[\u04ec-\u04ee]'	''	'a range spanning the old HAT value'
+
+# Hyphens in awkward places.
+chk '[a-c-e]'		abcde	'one hyphen shared by two ranges; gawk rejects this'
+chk '[a-c-]'		abc-	'a hyphen after a range is an ordinary member; gawk agrees'
+chk '[-a-c]'		abc-	'a hyphen before a range is an ordinary member; gawk agrees'
+chk '[a-c-e-g]'		abcdefg	'two hyphens shared by three ranges; gawk rejects this'
+chk '[a-c-e-]'		abcde-	'chained ranges then a trailing hyphen member; gawk rejects this'
+chk '[]-a]'		'a]'	'a literal ] may open a range'
+chk '[a^b]'		ab	'^ is only special as the first element'
+
 rm -rf $WORKDIR
 
 echo "	$nt tests"
