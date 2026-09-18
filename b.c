@@ -1323,7 +1323,7 @@ static int repeat(const uschar *reptok, int reptoklen, const uschar *atom,
 	return 0;
 }
 
-int relex(void)		/* lexical analyzer for reparse */
+static int cclex(void)
 {
 	int c, n;
 	int cflag;
@@ -1332,6 +1332,117 @@ int relex(void)		/* lexical analyzer for reparse */
 	uschar *bp;
 	const struct charclass *cc;
 	int i;
+
+	if (buf == NULL && (buf = (uschar *) malloc(bufsz)) == NULL)
+		FATAL("out of space in reg expr %.10s..", lastre);
+	bp = buf;
+	if (*prestr == '^') {
+		cflag = 1;
+		prestr++;
+	}
+	else
+		cflag = 0;
+	n = 5 * strlen((const char *) prestr)+1; /* BUG: was 2.  what value? */
+	if (!adjbuf((char **) &buf, &bufsz, n, n, (char **) &bp, "cclex1"))
+		FATAL("out of space for reg expr %.10s...", lastre);
+	for (; ; ) {
+		if ((n = u8_rune(&rlxval, (const char *) prestr)) > 1) {
+			for (i = 0; i < n; i++)
+				*bp++ = *prestr++;
+			continue;
+		}
+		if ((c = *prestr++) == '\\') {
+			*bp++ = '\\';
+			if ((c = *prestr++) == '\0')
+				FATAL("nonterminated character class %.20s...", lastre);
+			*bp++ = c;
+		/* } else if (c == '\n') { */
+		/* 	FATAL("newline in character class %.20s...", lastre); */
+		} else if (c == '[' && *prestr == ':') {
+			/* POSIX char class names, Dag-Erling Smorgrav, des@ofug.org */
+			for (cc = charclasses; cc->cc_name; cc++)
+				if (strncmp((const char *) prestr + 1, (const char *) cc->cc_name, cc->cc_namelen) == 0)
+					break;
+			if (cc->cc_name != NULL && prestr[1 + cc->cc_namelen] == ':' &&
+			    prestr[2 + cc->cc_namelen] == ']') {
+				prestr += cc->cc_namelen + 3;
+				/*
+				 * BUG: We begin at 1, instead of 0, since we
+				 * would otherwise prematurely terminate the
+				 * string for classes like [[:cntrl:]]. This
+				 * means that we can't match the NUL character,
+				 * not without first adapting the entire
+				 * program to track each string's length.
+				 */
+				for (i = 1; i <= UCHAR_MAX; i++) {
+					if (!adjbuf((char **) &buf, &bufsz, bp-buf+2, 100, (char **) &bp, "cclex2"))
+					    FATAL("out of space for reg expr %.10s...", lastre);
+					if (cc->cc_func(i)) {
+						/* escape backslash */
+						if (i == '\\') {
+							*bp++ = '\\';
+							n++;
+						}
+
+						*bp++ = i;
+						n++;
+					}
+				}
+			} else
+				*bp++ = c;
+		} else if (c == '[' && *prestr == '.') {
+			char collate_char;
+			prestr++;
+			collate_char = *prestr++;
+			if (*prestr == '.' && prestr[1] == ']') {
+				prestr += 2;
+				/* Found it: map via locale TBD: for
+				   now, simply return this char.  This
+				   is sufficient to pass conformance
+				   test awk.ex 156
+				 */
+				if (*prestr == ']') {
+					prestr++;
+					rlxval = collate_char;
+					return CHAR;
+				}
+			}
+		} else if (c == '[' && *prestr == '=') {
+			char equiv_char;
+			prestr++;
+			equiv_char = *prestr++;
+			if (*prestr == '=' && prestr[1] == ']') {
+				prestr += 2;
+				/* Found it: map via locale TBD: for now
+				   simply return this char. This is
+				   sufficient to pass conformance test
+				   awk.ex 156
+				 */
+				if (*prestr == ']') {
+					prestr++;
+					rlxval = equiv_char;
+					return CHAR;
+				}
+			}
+		} else if (c == '\0') {
+			FATAL("nonterminated character class %.20s", lastre);
+		} else if (bp == buf) {	/* 1st char is special */
+			*bp++ = c;
+		} else if (c == ']') {
+			*bp++ = 0;
+			rlxstr = (uschar *) tostring((char *) buf);
+			if (cflag == 0)
+				return CCL;
+			else
+				return NCCL;
+		} else
+			*bp++ = c;
+	}
+}
+
+int relex(void)		/* lexical analyzer for reparse */
+{
+	int c, n;
 	int num, m;
 	bool commafound, digitfound;
 	const uschar *startreptok;
@@ -1374,112 +1485,7 @@ rescan:
 		rlxval = c;
 		return CHAR;
 	case '[':
-		if (buf == NULL && (buf = (uschar *) malloc(bufsz)) == NULL)
-			FATAL("out of space in reg expr %.10s..", lastre);
-		bp = buf;
-		if (*prestr == '^') {
-			cflag = 1;
-			prestr++;
-		}
-		else
-			cflag = 0;
-		n = 5 * strlen((const char *) prestr)+1; /* BUG: was 2.  what value? */
-		if (!adjbuf((char **) &buf, &bufsz, n, n, (char **) &bp, "relex1"))
-			FATAL("out of space for reg expr %.10s...", lastre);
-		for (; ; ) {
-			if ((n = u8_rune(&rlxval, (const char *) prestr)) > 1) {
-				for (i = 0; i < n; i++)
-					*bp++ = *prestr++;
-				continue;
-			}
-			if ((c = *prestr++) == '\\') {
-				*bp++ = '\\';
-				if ((c = *prestr++) == '\0')
-					FATAL("nonterminated character class %.20s...", lastre);
-				*bp++ = c;
-			/* } else if (c == '\n') { */
-			/* 	FATAL("newline in character class %.20s...", lastre); */
-			} else if (c == '[' && *prestr == ':') {
-				/* POSIX char class names, Dag-Erling Smorgrav, des@ofug.org */
-				for (cc = charclasses; cc->cc_name; cc++)
-					if (strncmp((const char *) prestr + 1, (const char *) cc->cc_name, cc->cc_namelen) == 0)
-						break;
-				if (cc->cc_name != NULL && prestr[1 + cc->cc_namelen] == ':' &&
-				    prestr[2 + cc->cc_namelen] == ']') {
-					prestr += cc->cc_namelen + 3;
-					/*
-					 * BUG: We begin at 1, instead of 0, since we
-					 * would otherwise prematurely terminate the
-					 * string for classes like [[:cntrl:]]. This
-					 * means that we can't match the NUL character,
-					 * not without first adapting the entire
-					 * program to track each string's length.
-					 */
-					for (i = 1; i <= UCHAR_MAX; i++) {
-						if (!adjbuf((char **) &buf, &bufsz, bp-buf+2, 100, (char **) &bp, "relex2"))
-						    FATAL("out of space for reg expr %.10s...", lastre);
-						if (cc->cc_func(i)) {
-							/* escape backslash */
-							if (i == '\\') {
-								*bp++ = '\\';
-								n++;
-							}
-
-							*bp++ = i;
-							n++;
-						}
-					}
-				} else
-					*bp++ = c;
-			} else if (c == '[' && *prestr == '.') {
-				char collate_char;
-				prestr++;
-				collate_char = *prestr++;
-				if (*prestr == '.' && prestr[1] == ']') {
-					prestr += 2;
-					/* Found it: map via locale TBD: for
-					   now, simply return this char.  This
-					   is sufficient to pass conformance
-					   test awk.ex 156
-					 */
-					if (*prestr == ']') {
-						prestr++;
-						rlxval = collate_char;
-						return CHAR;
-					}
-				}
-			} else if (c == '[' && *prestr == '=') {
-				char equiv_char;
-				prestr++;
-				equiv_char = *prestr++;
-				if (*prestr == '=' && prestr[1] == ']') {
-					prestr += 2;
-					/* Found it: map via locale TBD: for now
-					   simply return this char. This is
-					   sufficient to pass conformance test
-					   awk.ex 156
-					 */
-					if (*prestr == ']') {
-						prestr++;
-						rlxval = equiv_char;
-						return CHAR;
-					}
-				}
-			} else if (c == '\0') {
-				FATAL("nonterminated character class %.20s", lastre);
-			} else if (bp == buf) {	/* 1st char is special */
-				*bp++ = c;
-			} else if (c == ']') {
-				*bp++ = 0;
-				rlxstr = (uschar *) tostring((char *) buf);
-				if (cflag == 0)
-					return CCL;
-				else
-					return NCCL;
-			} else
-				*bp++ = c;
-		}
-		break;
+		return cclex();
 	case '{':
 		if (isdigit((int) *(prestr))) {
 			num = 0;	/* Process as a repetition */
