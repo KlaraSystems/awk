@@ -1346,6 +1346,17 @@ static int cclex(void)
 	if (!adjbuf((char **) &buf, &bufsz, n, n, (char **) &bp, "cclex1"))
 		FATAL("out of space for reg expr %.10s...", lastre);
 	for (; ; ) {
+		int adjcnt = bp - buf + UCHAR_MAX + 2;
+
+		/*
+		 * Reserve room for the largest write any single pass can make.
+		 * A class expansion is the worst of them: every character up
+		 * to UCHAR_MAX, one more byte to escape the backslash among
+		 * them, and the terminator.
+		 */
+		if (!adjbuf((char **) &buf, &bufsz, adjcnt, 100, (char **) &bp, "cclex2"))
+			FATAL("out of space for reg expr %.10s...", lastre);
+
 		if ((n = u8_rune(&rlxval, (const char *) prestr)) > 1) {
 			for (i = 0; i < n; i++)
 				*bp++ = *prestr++;
@@ -1375,17 +1386,12 @@ static int cclex(void)
 				 * program to track each string's length.
 				 */
 				for (i = 1; i <= UCHAR_MAX; i++) {
-					if (!adjbuf((char **) &buf, &bufsz, bp-buf+2, 100, (char **) &bp, "cclex2"))
-					    FATAL("out of space for reg expr %.10s...", lastre);
 					if (cc->cc_func(i)) {
 						/* escape backslash */
-						if (i == '\\') {
+						if (i == '\\')
 							*bp++ = '\\';
-							n++;
-						}
 
 						*bp++ = i;
-						n++;
 					}
 				}
 			} else
