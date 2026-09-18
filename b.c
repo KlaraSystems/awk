@@ -1370,32 +1370,48 @@ static int cclex(void)
 		/* } else if (c == '\n') { */
 		/* 	FATAL("newline in character class %.20s...", lastre); */
 		} else if (c == '[' && *prestr == ':') {
+			const uschar *end = prestr + 1;
+
+			/*
+			 * Find the terminating ":]" in order to compute
+			 * the length of the character class name.
+			 */
+			while (*end != '\0' && *end != ':' && *end != ']')
+				end++;
+
+			if (end[0] != ':' || end[1] != ']')
+				FATAL("invalid character class name %.20s...", lastre);
+
 			/* POSIX char class names, Dag-Erling Smorgrav, des@ofug.org */
-			for (cc = charclasses; cc->cc_name; cc++)
+			for (cc = charclasses; cc->cc_name; cc++) {
+				if (cc->cc_namelen != (end - (prestr + 1)))
+					continue;
 				if (strncmp((const char *) prestr + 1, (const char *) cc->cc_name, cc->cc_namelen) == 0)
 					break;
-			if (cc->cc_name != NULL && prestr[1 + cc->cc_namelen] == ':' &&
-			    prestr[2 + cc->cc_namelen] == ']') {
-				prestr += cc->cc_namelen + 3;
-				/*
-				 * BUG: We begin at 1, instead of 0, since we
-				 * would otherwise prematurely terminate the
-				 * string for classes like [[:cntrl:]]. This
-				 * means that we can't match the NUL character,
-				 * not without first adapting the entire
-				 * program to track each string's length.
-				 */
-				for (i = 1; i <= UCHAR_MAX; i++) {
-					if (cc->cc_func(i)) {
-						/* escape backslash */
-						if (i == '\\')
-							*bp++ = '\\';
+			}
 
-						*bp++ = i;
-					}
+			if (cc->cc_name == NULL)
+				FATAL("invalid character class name %.20s...", lastre);
+
+			prestr += cc->cc_namelen + 3;
+
+			/*
+			 * BUG: We begin at 1, instead of 0, since we
+			 * would otherwise prematurely terminate the
+			 * string for classes like [[:cntrl:]]. This
+			 * means that we can't match the NUL character,
+			 * not without first adapting the entire
+			 * program to track each string's length.
+			 */
+			for (i = 1; i <= UCHAR_MAX; i++) {
+				if (cc->cc_func(i)) {
+					/* escape backslash */
+					if (i == '\\')
+						*bp++ = '\\';
+
+					*bp++ = i;
 				}
-			} else
-				*bp++ = c;
+			}
 		} else if (c == '[' && *prestr == '.') {
 			char collate_char;
 			prestr++;
