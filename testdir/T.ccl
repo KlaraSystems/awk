@@ -59,6 +59,50 @@ chk() {
 	fi
 }
 
+# gchk <regexp> <input> <expected> <note>
+#
+# gchk checks a gsub() over a subject given here rather than $data, so that
+# every match in it is counted.
+#
+# <expected> is "<count>:<result>" from gsub(/<regexp>/, "+", $0).  The count
+# matters as much as the result: a bug that skips a match part way through a
+# string still leaves plausible-looking output.
+#
+gchk() {
+	nt=`expr $nt + 1`
+	got=`printf '%s\n' "$2" | $awk '{ s = $0; n = gsub(/'"$1"'/, "+", s); print n ":" s }' 2>$err`
+	status=$?
+	if [ $status -ge 128 ]; then
+		echo "BAD: T.ccl $nt: gsub(/$1/) on '$2' died on signal `expr $status - 128` ($4)"
+		bad=`expr $bad + 1`
+	elif [ "x$got" != "x$3" ]; then
+		echo "BAD: T.ccl $nt: gsub(/$1/) on '$2' gave [$got], expected [$3] ($4)"
+		sed -e 's/^/	/' -e 3q $err
+		bad=`expr $bad + 1`
+	fi
+}
+
+# echk <regexp> <printf spec> <letter> <note>
+#
+# echk checks one escape against the character it denotes.
+#
+# The escape <regexp> names must match the control character <printf spec>
+# produces and must not match <letter>, which is what an unrecognized escape
+# falls back to.
+#
+echk() {
+	nt=`expr $nt + 1`
+	hit=`printf "$2\n" | $awk '/'"$1"'/ { print "y" }' 2>$err`
+	miss=`printf '%s\n' "$3" | $awk '/'"$1"'/ { print "y" }' 2>>$err`
+	if [ "x$hit" != "xy" ]; then
+		echo "BAD: T.ccl $nt: /$1/ did not match the character it names ($4)"
+		bad=`expr $bad + 1`
+	elif [ "x$miss" = "xy" ]; then
+		echo "BAD: T.ccl $nt: /$1/ also matched '$3' ($4)"
+		bad=`expr $bad + 1`
+	fi
+}
+
 ALPHA=abcdefgnqxyzABCFG
 DIGIT=0125789
 PUNCT='-=[]:.\!'
@@ -170,12 +214,24 @@ chk '[a[.c.]-e]'	'acde'	'[.c.] is a member, then c-e is a range'
 chk '[a-[.c.]]'		abc	'a collating element closes a range'
 chk '[[=a=]-[=c=]]'	abc	'equivalence classes as endpoints; gawk rejects this'
 
+# \U is not an escape in awk, so [\U00000061] is the class {U,0,6,1}.
+# Nothing here should read it as U+0061.
+#
+gchk '[\U00000061]'	aU061a	'4:a++++a'	'\U is literal; the class is U, 0, 6 and 1'
+
 # Under LC_ALL=C every character is its own equivalence class.
 chk '[[=a=]]'	a	'C locale: [=a=] is just a'
 chk '[[=a=][=c=]]'	ac	'C locale: two single-member classes'
 chk '[\000[=a=]]'	a	'a dropped NUL must not swallow the class after it'
 chk '[a\000[=c=]]'	ac	'a NUL between two members must not swallow the one after it'
 chk '[^[=a=]]'	"bcdefgnqxyzABCFG0125789-=[]:.\!"	'C locale: negated single-member class'
+
+# gsub() counts, which chk cannot see: these walk the string and re-match
+# after each replacement.
+#
+gchk '[ac]'	abcabc	'4:+b++b+'	'every a and c replaced, not just the first of each run'
+gchk '[ac]'	aXa	'2:+X+'	'a non-matching character between two matches'
+gchk '[ac]'	aaa	'3:+++'	'adjacent matches'
 
 # An escaped hyphen is a member, not a range separator.
 # gawk disagrees for the numeric spellings: it resolves \x2d and \055 before
@@ -211,6 +267,26 @@ bad_re() {
 		bad=`expr $bad + 1`
 	elif [ $status -ge 128 ]; then
 		echo "BAD: T.ccl $nt: /$1/ died on signal $status ($2)"
+		bad=`expr $bad + 1`
+	fi
+}
+
+# bad_dyn <awk string> <note>
+#
+# bad_dyn checks that a dynamic regular expression is rejected.
+#
+# Needed where the expression cannot be written between slashes, as one ending
+# in a backslash cannot.
+#
+bad_dyn() {
+	nt=`expr $nt + 1`
+	$awk 'BEGIN { if ("a" ~ "'"$1"'") print "matched" }' >/dev/null 2>&1
+	status=$?
+	if [ $status -eq 0 ]; then
+		echo "BAD: T.ccl $nt: dynamic [$1] was accepted, expected a syntax error ($2)"
+		bad=`expr $bad + 1`
+	elif [ $status -ge 128 ]; then
+		echo "BAD: T.ccl $nt: dynamic [$1] died on signal $status ($2)"
 		bad=`expr $bad + 1`
 	fi
 }
@@ -258,12 +334,13 @@ do
 	i=`expr $i + 1`
 done
 
-# KNOWN \uG, and pre-existing: HAT is NCHARS+2 == 1261 == U+04ED, and
-# makedfa() seeds the start state with cgoto(f, 2, HAT).  A class holding
-# that one code point therefore answers member(HAT) yes, the leaf goes live
-# in the start state, and the regexp matches everywhere.  U+04ED is the only
-# colliding value in 1..2000.  gawk gets all three of these right; these
-# cases record what we do, they do not assert that it is correct.
+# HAT used to be NCHARS+2 == 1261 == U+04ED, and makedfa() seeds the start
+# state with cgoto(f, 2, HAT), so a class holding that one code point answered
+# member(HAT) yes, its leaf went live in the start state, and the regexp
+# matched every line.  U+04ED was the only colliding value in 1..2000.  HAT
+# now sits above MAX_CODE_POINT, outside the code point space entirely, so all
+# four of these select nothing from $data.  T.utfre asserts the other half:
+# that U+04ED still matches itself.
 #
 chk '[\u04ec]'	''	'the neighbor below the old HAT value'
 chk '[\u04ee]'	''	'the neighbor above the old HAT value'
@@ -278,6 +355,48 @@ chk '[a-c-e-g]'		abcdefg	'two hyphens shared by three ranges; gawk rejects this'
 chk '[a-c-e-]'		abcde-	'chained ranges then a trailing hyphen member; gawk rejects this'
 chk '[]-a]'		'a]'	'a literal ] may open a range'
 chk '[a^b]'		ab	'^ is only special as the first element'
+
+# Malformed terminators.  Each of the three [..] forms is opened correctly
+# and then closed with the wrong character, so cclex() has to reject it
+# rather than run past the end of the expression looking for the terminator.
+#
+bad_re '[[:alpha:x]'	'a class name whose : is not followed by ]'
+bad_re '[[.x.y]'	'a collating element whose . is not followed by ]'
+bad_re '[[=x=y]'	'an equivalence class whose = is not followed by ]'
+bad_re '[abc'		'a bracket expression with no ]'
+bad_re '[[:alpha'	'a class name that runs off the end'
+bad_dyn '[a\\'		'a backslash as the last byte of the expression'
+
+# Uppercase hex digits.  hexstr() takes a-f and A-F by separate paths and
+# only the lowercase one had ever been exercised.
+#
+chk '[\x5B\x5D]'	'[]'	'\x5B should match [, \x5D should match ]'
+chk '[\x7A]'		z	'\x7A should match z'
+chk '[\x2E\x3A]'	':.'	'\x2E should match ., \x3A should match :'
+chk '[\x5B-\x5D]'	'[]\'	'\x5B-\x5D should match [, ] and \'
+chk '[\u005B-\u005D]'	'[]\'	'\u005B-\u005D should match [, ] and \'
+chk '[\x5b\x5D]'	'[]'	'a lower case \x5b and an upper case \x5D should both work'
+
+# Zero padding, up to hexstr()'s eight digit limit.  \u takes at most eight,
+# so a ninth digit is an ordinary member and [\u000000061] is {U+0006, 1}.
+# The one digit form is exercised by the range cases above.
+#
+chk '[\u61]'		a	'two digits'
+chk '[\u061]'		a	'three'
+chk '[\u0061]'		a	'four'
+chk '[\u00061]'		a	'five'
+chk '[\u000061]'	a	'six'
+chk '[\u0000061]'	a	'seven'
+chk '[\u00000061]'	a	'eight, the most \u takes'
+chk '[\u000000061]'	1	'nine: the ninth digit is a member, not part of the escape'
+
+# The escapes quoted() knows by name.  A letter following the backslash
+# that is not recognized is taken literally, so each of these must not match
+# its own letter: [\a] matching a would mean the escape had been ignored.
+#
+echk '[\t]'	'\011'	t	'\t is a tab'
+echk '[\v]'	'\013'	v	'\v is a vertical tab'
+echk '[\a]'	'\007'	a	'\a is a bell'
 
 rm -rf $WORKDIR
 
