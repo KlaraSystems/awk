@@ -1,0 +1,76 @@
+#!/bin/sh
+
+echo T.illformed: no ill-formed sequence decodes to a character
+
+# Feeds awk every two, three or four byte sequence that is not valid utf-8
+# even though its lead byte is followed by as many continuation bytes as it
+# calls for: an overlong form, a utf-16 surrogate, or a value past the last
+# code point.  u8_rune() hands each of those back a byte at a time, so every
+# byte of the sweep has to count as one character, and one comparison covers
+# all 1052800 of them -- length($0) must equal the size of the file.
+#
+# T.utf8bad covers the same three classes case by case, with the patterns that
+# used to match them and the contradictions they caused.  This is the other
+# half of that argument: not the examples but the whole space, which is what
+# the markers in b.c rest on.  CCL_CLAMP through HAT sit just above the last
+# code point, and the four byte sequences from F4 90 upward are exactly the
+# ones that used to decode into that range.
+#
+# A single byte locale answers "every byte is a character" whatever the decoder
+# does, so the sweep proves nothing there and the test needs a UTF-8 locale.
+#
+# The sweep is generated rather than stored, so it needs either a compiler or a
+# generator already built beside the test -- the Xcode build installs one here.
+# Where neither is available, skip rather than report a failure.
+
+awk=${awk-../a.out}
+
+WORKDIR=`mktemp -d /tmp/nawktest.XXXXXX`
+gen=$WORKDIR/genallmbchars
+data=$WORKDIR/illformed.data
+
+if [ -x ./genallmbchars ] ; then
+	gen=./genallmbchars
+elif ! cc -o $gen genallmbchars.c 2>/dev/null ; then
+	echo "	T.illformed: no generator and no C compiler, sweep skipped"
+	rm -rf $WORKDIR
+	exit 0
+fi
+
+$gen -i >$data 2>/dev/null || {
+	echo "BAD: T.illformed: genallmbchars failed"
+	rm -rf $WORKDIR
+	exit 1
+}
+
+# Any UTF-8 locale will do: this needs multibyte input, not collation.
+#
+utf8=
+for loc in C.UTF-8 en_US.UTF-8 en_US.utf8 es_ES.UTF-8 de_DE.UTF-8
+do
+	n=`printf '\303\251\n' | LC_ALL=$loc $awk '{ print length($0) }' 2>/dev/null`
+	if [ "x$n" = x1 ] ; then
+		utf8=$loc
+		break
+	fi
+done
+
+if [ -z "$utf8" ] ; then
+	echo "	T.illformed: no UTF-8 locale, sweep skipped"
+	rm -rf $WORKDIR
+	exit 0
+fi
+
+# The sweep holds no newline, so it arrives as one record.  Both answers come
+# from the same pass: length() counts what the decoder reports, and /./ counts
+# what the regular expression engine walks over, and a sequence that decoded
+# would shorten them together.
+#
+bytes=`wc -c < $data | tr -d ' '`
+got=`LC_ALL=$utf8 $awk '{ printf "%d %d", length($0), gsub(/./, ".") }' $data`
+
+if [ "x$got" != "x$bytes $bytes" ] ; then
+	echo "BAD: T.illformed: got [$got] where $bytes bytes were written, under $utf8"
+fi
+
+rm -rf $WORKDIR
