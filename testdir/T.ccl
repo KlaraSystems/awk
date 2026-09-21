@@ -212,7 +212,10 @@ chk '[^[.0.]-[.9.]]'	"$ALPHA$PUNCT"	'the negated range was never built'
 #
 chk '[a[.c.]-e]'	'acde'	'[.c.] is a member, then c-e is a range'
 chk '[a-[.c.]]'		abc	'a collating element closes a range'
-chk '[[=a=]-[=c=]]'	abc	'equivalence classes as endpoints; gawk rejects this'
+# An equivalence class denotes a set, so unlike a collating element it is
+# not a range endpoint; the hyphen beside one stays an ordinary member.
+#
+chk '[[=a=]-[=c=]]'	'ac-'	'equiv classes are not endpoints; gawk rejects this'
 
 # \U is not an escape in awk, so [\U00000061] is the class {U,0,6,1}.
 # Nothing here should read it as U+0061.
