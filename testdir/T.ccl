@@ -13,8 +13,9 @@ echo T.ccl: tests of bracket expressions
 awk=${awk-../a.out}
 
 # Equivalence classes are the one construct here whose meaning depends on the
-# locale, so run under LC_ALL=C, where POSIX makes every character its own
-# equivalence class.
+# locale, so the body below runs under LC_ALL=C, where POSIX makes every
+# character its own equivalence class.  The cases that need a locale with
+# real collation weights are collected at the end and run separately.
 #
 LC_ALL=C
 export LC_ALL
@@ -212,6 +213,7 @@ chk '[^[.0.]-[.9.]]'	"$ALPHA$PUNCT"	'the negated range was never built'
 #
 chk '[a[.c.]-e]'	'acde'	'[.c.] is a member, then c-e is a range'
 chk '[a-[.c.]]'		abc	'a collating element closes a range'
+
 # An equivalence class denotes a set, so unlike a collating element it is
 # not a range endpoint; the hyphen beside one stays an ordinary member.
 #
@@ -436,6 +438,416 @@ chk '[\u000000061]'	1	'nine: the ninth digit is a member, not part of the escape
 echk '[\t]'	'\011'	t	'\t is a tab'
 echk '[\v]'	'\013'	v	'\v is a vertical tab'
 echk '[\a]'	'\007'	a	'\a is a bell'
+
+# --- cases that need a locale with collation weights ----------------------
+#
+# Everything above runs under LC_ALL=C, where [=x=] cannot be broader than x,
+# so none of it can tell an expanding equivalence class from an inert one.
+# Find a locale that does expand [=a=] and re-run the cases that depend on
+# it there.  If there is no such locale they are reported as skipped, so a
+# build with equivalence classes disabled does not look like a pass.
+# A missing locale is not an error -- setlocale() just falls back to C, which
+# looks exactly like an inert [=a=].  So consult locale -a: if one of these is
+# installed and still does not expand, that is a failure, not a skip.
+#
+# Every candidate must be a locale that genuinely has collation weights.
+# C.UTF-8 is deliberately absent: it pairs UTF-8 with C collation, where each
+# character really is its own equivalence class, so it would look inert on a
+# correct build and is useless as evidence either way.
+#
+collate=
+installed=
+avail=" `locale -a 2>/dev/null | tr '\n' ' '` "
+for loc in en_US.UTF-8 en_US.utf8 es_ES.UTF-8 de_DE.UTF-8 fr_FR.UTF-8
+do
+	case "$avail" in
+	*" $loc "*)	;;
+	*)		continue ;;
+	esac
+	installed=$loc
+	got=`LC_ALL=$loc $awk '/[[=a=]]/ { printf "%s", $0 }' $data 2>/dev/null`
+	if [ "x$got" = "xaA" ]
+	then
+		collate=$loc
+		break
+	fi
+done
+
+if [ -z "$collate" ]
+then
+	if [ -n "$installed" ]
+	then
+		nt=`expr $nt + 1`
+		echo "BAD: T.ccl $nt: $installed is installed but [=a=] selected [$got], expected [aA]; equivalence classes are inert"
+		bad=`expr $bad + 1`
+	else
+		echo "	T.ccl: no UTF-8 locale installed; equivalence class tests skipped"
+	fi
+else
+
+	# lchk <regexp> <expected> <note>
+	#
+	# lchk is chk run under $collate.
+	#
+	lchk() {
+		nt=`expr $nt + 1`
+		got=`LC_ALL=$collate $awk '/'"$1"'/ { printf "%s", $0 }' $data 2>$err`
+		status=$?
+		if [ $status -ge 128 ]; then
+			echo "BAD: T.ccl $nt: /$1/ died on signal `expr $status - 128` ($3)"
+			bad=`expr $bad + 1`
+		elif [ "x$got" != "x$2" ]; then
+			echo "BAD: T.ccl $nt: /$1/ selected [$got], expected [$2] ($3) [$collate]"
+			sed -e 's/^/	/' -e 3q $err
+			bad=`expr $bad + 1`
+		fi
+	}
+
+	# lgchk <regexp> <input> <expected> <note>
+	#
+	# lgchk is gchk run under $collate.
+	#
+	lgchk() {
+		nt=`expr $nt + 1`
+		got=`printf '%s\n' "$2" | LC_ALL=$collate $awk '{ s = $0; n = gsub(/'"$1"'/, "+", s); print n ":" s }' 2>$err`
+		status=$?
+		if [ $status -ge 128 ]; then
+			echo "BAD: T.ccl $nt: gsub(/$1/) on '$2' died on signal `expr $status - 128` ($4)"
+			bad=`expr $bad + 1`
+		elif [ "x$got" != "x$3" ]; then
+			echo "BAD: T.ccl $nt: gsub(/$1/) on '$2' gave [$got], expected [$3] ($4) [$collate]"
+			sed -e 's/^/	/' -e 3q $err
+			bad=`expr $bad + 1`
+		fi
+	}
+
+	# lbad_re <regexp> <note>
+	#
+	# lbad_re is bad_re run under $collate.
+	#
+	# The expression must be rejected there, where a multibyte sequence is
+	# one character.
+	#
+	lbad_re() {
+		nt=`expr $nt + 1`
+		LC_ALL=$collate $awk '/'"$1"'/ { print }' $data >/dev/null 2>&1
+		status=$?
+		if [ $status -eq 0 ]; then
+			echo "BAD: T.ccl $nt: /$1/ was accepted, expected a syntax error ($2) [$collate]"
+			bad=`expr $bad + 1`
+		elif [ $status -ge 128 ]; then
+			echo "BAD: T.ccl $nt: /$1/ died on signal `expr $status - 128` ($2) [$collate]"
+			bad=`expr $bad + 1`
+		fi
+	}
+
+	# The class expands at all.  Every case below depends on this one.
+	lchk '[[=a=]]'	aA	'[=a=] reaches the other member of a primary weight'
+	lchk '[[=c=]]'	cC	'[=c=] reaches C'
+
+	# Several equivalence classes in one bracket expression, including
+	# repeats: each writes a marker that cclenter() resolves against the
+	# character before it, so a run of them exercises that lookback.
+	#
+	lchk '[[=a=][=c=]]'	acAC	'two classes'
+	lchk '[[=a=][=a=]]'	aA	'the same class twice'
+	lchk '[[=a=][=a=][=c=][=c=]]'	acAC	'both classes twice, interleaved'
+	lchk '[a[=c=]f]'	acfC	'a class between two literals'
+
+	# Negation, which reaches member() through the NCCL arm of cgoto().
+	lchk '[^[=a=]]'	"bcdefgnqxyzBCFG0125789-=[]:.\!"	'negated class excludes every member'
+	lchk '[^[=a=][=c=]]'	"bdefgnqxyzBFG0125789-=[]:.\!"	'negated, two classes'
+	lchk '[^[=a=]d-z]'	"bcBCFG0125789-=[]:.\!"	'negated, class plus a range'
+
+	# A NUL is dropped from the class; the marker after it must survive.
+	lchk '[\000[=a=]]'	aA	'octal NUL before a class'
+	lchk '[\x00[=a=]]'	aA	'\x00 before a class'
+	lchk '[a\000[=c=]]'	acC	'NUL between a literal and a class'
+	lchk '[\000[=a=][=c=]]'	acAC	'NUL before two classes'
+
+	# Escape boundaries: quoted() must not pull the class expansion into
+	# the escape before it.
+	#
+	lchk '[\xa[=f=]]'	fF	'was \xaf, so f and F were lost'
+	lchk '[\1[=c=]]'	cC	'octal escape followed by a class'
+
+	# [.x.] is exact where [=x=] is broad -- the whole point of having both.
+	lchk '[[=a=][.c.]]'	acA	'[.c.] adds only c, [=a=] adds A'
+
+	# ] first, so it is a member rather than the terminator.
+	lchk '[][=a=]]'	"aA]"	'literal ] alongside a class'
+
+	# POSIX leaves an equivalence class as a range endpoint undefined; we
+	# keep the - as an ordinary member.  gawk rejects the expression.
+	#
+	lchk '[[=a=]-[=c=]]'	"acAC-"	'equiv endpoints are not a range; - stays literal'
+
+	lgchk '[[=a=]]'	aAaA	'4:++++'	'gsub replaces every member of the class'
+	lgchk '[[=a=][=c=]]'	acAC	'4:++++'	'gsub across two classes'
+	lgchk '[\u61[=c=]]'	abcABCabc61	'5:+b+AB++b+61'	'[=c=] also replaces C here'
+
+	# A primary weight of more than one element, which a single integer
+	# could not have held: AE is an expansion collating as "ae", so it
+	# shares only its first element with a and is no member of [=a=].
+	# U+3200 does the same with "(kiyeok)" under ko_KR, which none of the
+	# candidate locales above covers.
+	#
+	lgchk '[[=a=]]'	aAÆæ	'2:++Ææ'	'AE expands to "ae", so it is not equivalent to a'
+
+	# Equivalence is symmetric: naming either member reaches the other.
+	# This holds whatever the locale's weights are, so unlike the cases
+	# above it tests the comparison rather than the collation data.
+	#
+	lgchk '[[=A=]]'	aA	'2:++'	'the class named from the other side is the same class'
+	lgchk '[[=a=]]'	aAäÄæ	'4:++++æ'	'a-umlaut does share a weight with a, where AE does not'
+	lgchk '[[=æ=]]'	æÆäa	'2:++äa'	'[=AE=] holds only itself in these locales'
+
+	# A character the locale collates as nothing must not look equivalent
+	# to every other.  It drops out of the strings cclcoll() compares,
+	# leaving its trailing pair to decide alone, which is why cclequiv()
+	# asks twice with two disjoint pairs.
+	#
+	lgchk '[[=a=]]'	aAӭ	'2:++ӭ'	'an ignorable character is not a member'
+
+	# A collating element or equivalence class names one character.  These
+	# four bytes look like a 4-byte sequence but encode U+1FFFFF, past the
+	# last code point, so u8_rune() hands them back one at a time and the
+	# element holds four characters rather than one.  Reaching cclenter()
+	# instead, the value was dropped from the stored class while its marker
+	# stayed behind, attaching to whatever preceded it: [a[=<U+1FFFFF>=]]
+	# matched A.  Checked under $collate, since LC_ALL=C makes every byte a
+	# character and would reject these whatever the decoder did.
+	#
+	big=`printf '\367\277\277\277'`
+	lbad_re "[a[=$big=]]"	'an equivalence class naming a sequence that encodes nothing'
+	lbad_re "[[=$big=]]"	'such a sequence with nothing else in the class'
+	lbad_re "[a[.$big.]]"	'a collating element naming such a sequence'
+fi
+
+# xgchk <locale> <regexp> <subject> <expected> <note>
+#
+# xgchk is gchk run under the locale named here.
+#
+# For the blocks below that each need a different one.
+#
+xgchk() {
+	nt=`expr $nt + 1`
+	got=`printf '%s\n' "$3" | LC_ALL=$1 $awk '{ s = $0; n = gsub(/'"$2"'/, "+", s); print n ":" s }' 2>$err`
+	status=$?
+	if [ $status -ge 128 ]; then
+		echo "BAD: T.ccl $nt: gsub(/$2/) on '$3' died on signal `expr $status - 128` ($5) [$1]"
+		bad=`expr $bad + 1`
+	elif [ "x$got" != "x$4" ]; then
+		echo "BAD: T.ccl $nt: gsub(/$2/) on '$3' gave [$got], expected [$4] ($5) [$1]"
+		sed -e 's/^/	/' -e 3q $err
+		bad=`expr $bad + 1`
+	fi
+}
+
+# --- characters the locale collates as nothing ------------------------------
+#
+# Such a character has no primary weight, so every one of them shares the same
+# absence and they come out as a single equivalence class: the class of one
+# reaches every other, and nothing that is collated.  That is what reading
+# "equivalent" as "shares a primary weight" gives when the weight is empty.
+# It is not obviously what a reader of the expression expects, so guard it.
+#
+# A soft hyphen and a zero width joiner are used because collations ignore
+# format characters by design.  Which *other* characters are ignored is
+# locale data -- glibc ignores ASCII punctuation where Darwin does not -- so
+# naming one of those would test the locale rather than this code.
+#
+if [ -z "$collate" ]
+then
+	echo "	T.ccl: no collating locale; ignored-character tests skipped"
+else
+	xgchk $collate '[[=­=]]' '­‍a' '2:++a' 'the class of an ignored character reaches another'
+	xgchk $collate '[[=‍=]]' '­‍a' '2:++a' 'the same class named from the other side'
+	xgchk $collate '[[=­=]]' 'a­' '1:a+' 'but reaches nothing the locale collates'
+fi
+
+# --- cases that need a locale where AE is a letter of its own --------------
+#
+# The block above runs somewhere AE collates as the digraph "ae": its primary
+# weight is a two element sequence, so it shares only the first element with a
+# and belongs to no class of a's.  The Nordic locales take the other route and
+# make it a letter in its own right, sorting after z, where it shares a primary
+# weight with a-umlaut -- Old Swedish wrote AE where Swedish now writes
+# A-umlaut.  Neither reading puts AE with a, but they disagree about what it
+# does belong with, and only the locale knows which is in force.  These are the
+# cases a fixed equivalence table cannot get right in both places.
+#
+nordic=
+ninstalled=
+for loc in da_DK.UTF-8 sv_SE.UTF-8 nb_NO.UTF-8 no_NO.UTF-8 da_DK.utf8 sv_SE.utf8 nb_NO.utf8
+do
+	case "$avail" in
+	*" $loc "*)	;;
+	*)		continue ;;
+	esac
+	ninstalled=$loc
+	got=`printf '%s\n' 'æä' | LC_ALL=$loc $awk '{ print gsub(/[[=æ=]]/, "+") }' 2>/dev/null`
+	if [ "x$got" = "x2" ]
+	then
+		nordic=$loc
+		break
+	fi
+done
+
+if [ -z "$nordic" ]
+then
+	if [ -n "$ninstalled" ]
+	then
+		nt=`expr $nt + 1`
+		echo "BAD: T.ccl $nt: $ninstalled is installed but [=æ=] reached [$got] of the 2 members it shares a weight with"
+		bad=`expr $bad + 1`
+	else
+		echo "	T.ccl: no Nordic UTF-8 locale installed; [=æ=] as a letter tests skipped"
+	fi
+else
+
+	# ngchk <regexp> <input> <expected> <note>
+	#
+	# ngchk is gchk run under $nordic.
+	#
+	ngchk() {
+		nt=`expr $nt + 1`
+		got=`printf '%s\n' "$2" | LC_ALL=$nordic $awk '{ s = $0; n = gsub(/'"$1"'/, "+", s); print n ":" s }' 2>$err`
+		status=$?
+		if [ $status -ge 128 ]; then
+			echo "BAD: T.ccl $nt: gsub(/$1/) on '$2' died on signal `expr $status - 128` ($4)"
+			bad=`expr $bad + 1`
+		elif [ "x$got" != "x$3" ]; then
+			echo "BAD: T.ccl $nt: gsub(/$1/) on '$2' gave [$got], expected [$3] ($4) [$nordic]"
+			sed -e 's/^/	/' -e 3q $err
+			bad=`expr $bad + 1`
+		fi
+	}
+
+	ngchk '[[=a=]]'	aAbB	'2:++bB'	'the class still expands here'
+	ngchk '[[=æ=]]'	æÆäÄa	'4:++++a'	'AE is a letter of its own, sharing a weight with a-umlaut'
+	ngchk '[[=ä=]]'	äÄæÆa	'4:++++a'	'the same class read from the other side'
+	ngchk '[[=a=]]'	aAæä	'2:++æä'	'neither AE nor a-umlaut belongs to [=a=] here'
+
+	# A trailing letter can combine with the character under test to make a
+	# contraction: "aa" is how Danish spells a-ring, which sorts after z, so
+	# comparing through it hid every accented a.  cclequiv() uses digits.
+	#
+	ngchk '[[=a=]]'	aAáÁæ	'4:++++æ'	'a-acute belongs with a, and the aa contraction must not hide it'
+	ngchk '[[=á=]]'	aAáÁ	'4:++++'	'the same class named from the accented side'
+fi
+
+# --- cases from the locales where the old defect was worst -----------------
+#
+# [=x=] used to be derived from a single integer weight, which collapsed every
+# character whose primary weight is a *sequence* into the class of whatever
+# shared its first element.  The two worst instances are here.  In fa_IR a
+# truncated weight put U+0608 together with U+060E, U+060F and two others; in
+# ko_KR, U+3200 collates as the three elements of "(<kiyeok>)" and so joined
+# the class of "(", which accounted for 19358 characters in that locale alone.
+# Both assertions are negative -- each character is alone in its class -- so
+# they guard against over-grouping rather than proving the feature works; the
+# blocks above do that.
+#
+# Greek is the other direction, an equivalence only the locale knows: final
+# sigma shares a primary weight with sigma, and either spelling of the class
+# reaches both, plus the capital.
+#
+# Each group is gated on its own locale.  One that is not installed is a skip.
+# One that is installed and disagrees is a failure, since that is either this
+# code being wrong or the locale data differing in a way worth knowing about.
+
+arabic=
+for loc in fa_IR.UTF-8 fa_IR.utf8 fa_IR ar_SA.UTF-8 ar_SA.utf8 ar_SA ar_EG.UTF-8 ar_EG.utf8 ar_EG
+do
+	case "$avail" in
+	*" $loc "*)	;;
+	*)		continue ;;
+	esac
+
+	# The classes below name multibyte characters, so this has to be a
+	# locale where awk counts characters and not bytes.  It also has to
+	# be one that gives U+0608 a primary weight of its own: glibc gives
+	# it, U+060E and U+060F a single shared weight, where Darwin gives
+	# each a weight beginning with the same element and diverging after
+	# it.  Only the latter can show the truncation these cases are
+	# about, so a locale of the former kind is no evidence either way.
+	#
+	n=`printf '%s\n' '؈؎؏' | LC_ALL=$loc $awk '{ print length($0) }' 2>/dev/null`
+	got=`printf '%s\n' '؈؎؏' | LC_ALL=$loc $awk '{ print gsub(/[[=؈=]]/, "+") }' 2>/dev/null`
+	if [ "x$n" = "x3" ] && [ "x$got" = "x1" ]
+	then
+		arabic=$loc
+		break
+	fi
+done
+if [ -z "$arabic" ]
+then
+	echo "	T.ccl: no Arabic UTF-8 locale giving U+0608 a primary weight of its own; those tests skipped"
+else
+
+	# That U+0608 is alone is what the gate above established.  These two
+	# say the same of the other members of the weight it used to be
+	# grouped with, which does not follow from it.
+	#
+	xgchk $arabic '[[=؎=]]' '؈؎؏' '1:؈+؏' 'U+060E alone; a truncated weight took in U+0608'
+	xgchk $arabic '[[=؏=]]' '؈؎؏' '1:؈؎+' 'U+060F alone; a truncated weight took in U+0608'
+fi
+
+cjk=
+for loc in ko_KR.UTF-8 ko_KR.utf8 ko_KR zh_CN.UTF-8 zh_CN.utf8 zh_CN ja_JP.UTF-8 ja_JP.utf8 ja_JP
+do
+	case "$avail" in
+	*" $loc "*)	;;
+	*)		continue ;;
+	esac
+
+	# The classes below name multibyte characters, so this has to be a
+	# locale where awk counts characters and not bytes.
+	#
+	n=`printf '%s\n' '(㈀㈁' | LC_ALL=$loc $awk '{ print length($0) }' 2>/dev/null`
+	if [ "x$n" = "x3" ]
+	then
+		cjk=$loc
+		break
+	fi
+done
+if [ -z "$cjk" ]
+then
+	echo "	T.ccl: no CJK UTF-8 locale installed; U+3200 tests skipped"
+else
+	xgchk $cjk '[[=(=]]' '(㈀㈁' '1:+㈀㈁' 'a left paren does not reach the parenthesized forms that expand through it'
+	xgchk $cjk '[[=㈀=]]' '(㈀㈁' '1:(+㈁' 'U+3200 is alone in its own class'
+fi
+
+greek=
+for loc in el_GR.UTF-8 el_GR.utf8 el_GR el_CY.UTF-8 el_CY.utf8 el_CY
+do
+	case "$avail" in
+	*" $loc "*)	;;
+	*)		continue ;;
+	esac
+
+	# The classes below name multibyte characters, so this has to be a
+	# locale where awk counts characters and not bytes.
+	#
+	n=`printf '%s\n' 'σςΣτ' | LC_ALL=$loc $awk '{ print length($0) }' 2>/dev/null`
+	if [ "x$n" = "x4" ]
+	then
+		greek=$loc
+		break
+	fi
+done
+if [ -z "$greek" ]
+then
+	echo "	T.ccl: no Greek UTF-8 locale installed; final sigma tests skipped"
+else
+	xgchk $greek '[[=σ=]]' 'σςΣτ' '3:+++τ' 'final sigma shares a primary weight with sigma'
+	xgchk $greek '[[=ς=]]' 'σςΣτ' '3:+++τ' 'the same class named by the final form'
+	xgchk $greek '[[=Σ=]]' 'σςΣτ' '3:+++τ' 'the same class named by the capital'
+	xgchk $greek '[[=α=]]' 'αάΑβ' '3:+++β' 'alpha with tonos belongs with alpha'
+	xgchk $greek '[[=ά=]]' 'αάΑβ' '3:+++β' 'named from the accented side'
+fi
 
 rm -rf $WORKDIR
 
