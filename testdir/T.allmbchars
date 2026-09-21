@@ -1,0 +1,119 @@
+#!/bin/sh
+
+echo T.allmbchars: every structurally valid multibyte sequence is one character
+
+# Feeds awk every well formed 2, 3 and 4-byte UTF-8 sequence, whether or not it
+# names an assigned code point, and checks that /./ and /[^aeiou]/ see each one
+# exactly once.
+#
+# The generator leaves out the sequences that encode no character -- an overlong
+# form, a utf-16 surrogate, or a value past the last code point -- because
+# u8_rune() returns those a byte at a time rather than as one character.  A
+# marker placed above the last code point is therefore no longer reachable from
+# input at all, which is a stronger guarantee than this sweep can make; the
+# sweep covers the alphabet that can still reach cgoto().
+#
+# The generator reports how many characters and how many bytes it wrote, so the
+# expected counts are computed rather than stored.  Nothing here depends on the
+# name of a locale, on its collation tables, or on saved output that has to be
+# refreshed when behavior changes.
+#
+# What it is for: b.c reserves a few values above the range u8_rune() can
+# return as internal markers, and cgoto() excludes HAT from the DOT and NCCL
+# arms.  An input character whose value collides with HAT is therefore
+# invisible to both /./ and /[^...]/ -- it is not merely mismatched, it is
+# skipped, and gsub() walks straight past its bytes.  That is a property of the
+# whole alphabet rather than of any one character, so a sweep finds collisions
+# nobody thought to look for.  It has found two: HAT was NCHARS+2 == U+04ED
+# until it moved into b.c, and MAX_CODE_POINT+4 == U+110003 back when u8_rune()
+# would decode a four byte form that far.  It no longer does, which is what
+# keeps the markers out of reach where they sit now; T.utf8bad guards that,
+# and this sweep covers the alphabet below it.
+#
+# Equivalence classes are deliberately not swept here.  Which characters share
+# a primary collation weight is the locale's assertion rather than awk's, so
+# the expected output would differ between platforms and would be testing libc.
+# T.ccl and T.utfre cover the awk side of [=x=].
+
+awk=${awk-../a.out}
+nt=0
+bad=0
+
+WORKDIR=`mktemp -d /tmp/nawktest.XXXXXX`
+gen=$WORKDIR/genallmbchars
+data=$WORKDIR/allmbchars.data
+counts=$WORKDIR/allmbchars.counts
+
+# The sweep is generated rather than stored, so it needs either a compiler or a
+# generator already built beside the test -- the Xcode build installs one here,
+# which is what lets this run where there is no toolchain.  Where neither is
+# available, skip rather than report a failure.
+#
+if [ -x ./genallmbchars ]
+then
+	gen=./genallmbchars
+elif ! cc -o $gen genallmbchars.c 2>/dev/null
+then
+	echo "	T.allmbchars: no generator and no C compiler, sweep skipped"
+	rm -rf $WORKDIR
+	exit 0
+fi
+$gen -v >$data 2>$counts || {
+	echo "BAD: T.allmbchars: genallmbchars failed"
+	rm -rf $WORKDIR
+	exit 1
+}
+
+chars=`sed -n 's/^total mb chars \([0-9]*\),.*/\1/p' $counts`
+bytes=`sed -n 's/^.*total bytes \([0-9]*\).*/\1/p' $counts`
+if [ -z "$chars" ] || [ -z "$bytes" ]; then
+	echo "BAD: T.allmbchars: could not read the counts from genallmbchars"
+	rm -rf $WORKDIR
+	exit 1
+fi
+
+# cnt <locale> <regexp> <expected> <note>
+#
+# cnt counts how many times <regexp> matches across the sweep file.
+#
+# Runs under <locale> and complains unless the total is <expected>.
+#
+cnt() {
+	nt=`expr $nt + 1`
+	got=`LC_ALL=$1 $awk '{ n += gsub(/'"$2"'/, "x") } END { print n+0 }' $data`
+	if [ "x$got" != "x$3" ]; then
+		echo "BAD: T.allmbchars $nt: LC_ALL=$1 /$2/ matched $got, expected $3 ($4)"
+		bad=`expr $bad + 1`
+	fi
+}
+
+# A single byte locale sees one character per byte.
+cnt C '.' $bytes 'every byte is a character'
+cnt C '[^aeiou]' $bytes 'no byte here is an ASCII vowel'
+cnt C '[aeiou]' 0 'control: the input really holds no ASCII vowel'
+
+# Any UTF-8 locale will do: this needs multibyte input, not collation.
+utf8=
+for loc in C.UTF-8 en_US.UTF-8 en_US.utf8 es_ES.UTF-8 de_DE.UTF-8
+do
+	n=`printf '\303\251\n' | LC_ALL=$loc $awk '{ print length($0) }' 2>/dev/null`
+	if [ "x$n" = x1 ]
+	then
+		utf8=$loc
+		break
+	fi
+done
+
+if [ -z "$utf8" ]
+then
+	echo "	T.allmbchars: no UTF-8 locale found, multibyte counts skipped"
+else
+	cnt $utf8 '.' $chars 'every sequence is exactly one character'
+	cnt $utf8 '[^aeiou]' $chars 'and none of them is an ASCII vowel'
+	cnt $utf8 '[aeiou]' 0 'control: still no ASCII vowel'
+fi
+
+rm -rf $WORKDIR
+
+echo "	$nt tests"
+test $bad -eq 0
