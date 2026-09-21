@@ -161,6 +161,7 @@ int main(int argc, char *argv[])
 	char *fn, *vn;
 
 	setlocale(LC_CTYPE, "");
+	setlocale(LC_COLLATE, "");	/* member() consults it for [=x=] */
 	setlocale(LC_NUMERIC, "C"); /* for parsing cmdline & prog */
 	awk_mb_cur_max = MB_CUR_MAX;
 	utf8_mode = locale_is_utf8();

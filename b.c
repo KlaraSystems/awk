@@ -31,6 +31,7 @@ THIS SOFTWARE.
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <wchar.h>
 #include "awk.h"
 #include "awkgram.tab.h"
 
@@ -48,7 +49,8 @@ THIS SOFTWARE.
  */
 #define CCL_CLAMP       (MAX_CODE_POINT + 1)
 #define CCL_FENCE       (MAX_CODE_POINT + 2)
-#define HAT             (MAX_CODE_POINT + 3)
+#define CCL_EQUIV       (MAX_CODE_POINT + 3)
+#define HAT             (MAX_CODE_POINT + 4)
 
 
 #define MAXLIN 22
@@ -459,7 +461,8 @@ int *cclenter(const char *argp)	/* add a character class */
 
 		if (c == '\\') {
 			c = quoted(&p);
-		} else if (c == '-' && i > 0 && bp[-1] != CCL_FENCE) {
+		} else if (c == '-' && i > 0 && bp[-1] != CCL_FENCE &&
+		    bp[-1] != CCL_EQUIV) {
 			if (*p != 0) {
 				c = bp[-1];
 				/* c2 = *p++; */
@@ -536,10 +539,14 @@ store:
 	 * Copy buf[] to retp[], dropping anything that is not a character:
 	 * NULs from \0 or a malformed \x, values outside the Unicode range
 	 * from an oversized \u, and the fence cclex() inserts to keep a
-	 * following class expansion from being misread.
+	 * following class expansion from being misread.  CCL_EQUIV stays:
+	 * member() needs it to tell which characters were written as
+	 * equivalence classes, and cclex() only writes one after a character
+	 * that survives this loop.
 	 */
 	for (i = j = 0; i < bp-buf+1; i++) {
-		if (buf[i] > 0 && buf[i] <= MAX_CODE_POINT)
+		if (buf[i] > 0 &&
+		    (buf[i] <= MAX_CODE_POINT || buf[i] == CCL_EQUIV))
 			retp[j++] = buf[i];
 	}
 	assert(retp[j] == 0);
@@ -688,13 +695,86 @@ void follow(Node *v)	/* collects leaves that can follow v into setvec */
 	}
 }
 
+/*
+ * Test whether two characters share a primary collation weight, using the
+ * trailing pair s1 and s2 to separate them.
+ *
+ * Where x and y agree at the primary level the trailing characters are all
+ * that separates "x s1" from "y s2" and "x s2" from "y s1", and they
+ * separate them in opposite directions; where x and y disagree, that
+ * disagreement decides both comparisons the same way.  So the two agree
+ * exactly when the results differ in sign.
+ */
+static bool cclcoll(int x, int y, wchar_t s1, wchar_t s2)
+{
+	wchar_t p[] = { (wchar_t) x, s1, 0 };
+	wchar_t q[] = { (wchar_t) y, s2, 0 };
+	int r1, r2;
+
+	r1 = wcscoll(p, q);
+
+	p[1] = s2;
+	q[1] = s1;
+	r2 = wcscoll(p, q);
+
+	if (r1 == 0 || r2 == 0)
+		return false;
+
+	return (r1 > 0) != (r2 > 0);
+}
+
+/*
+ * Test whether the given characters belong to the same equivalence class,
+ * which is to say whether they share a primary collation weight.
+ *
+ * A character the locale collates as nothing vanishes from the strings that
+ * cclcoll() builds, leaving the trailing pair to decide on its own, so it
+ * would be reported equal to anything in the right hand sentinel's class.
+ * Asking a second time with a disjoint pair settles it: characters that
+ * really share a weight agree whichever pair is used, while a vanishing
+ * one can only agree with one of them.
+ *
+ * The trailing characters are digits because a letter can combine with the
+ * one being tested to form a contraction, which collates as something else
+ * altogether: Danish spells the letter a-ring "aa", sorting it after z, so
+ * a trailing 'a' had [[=a=]] in da_DK reject a-acute and sixty others.
+ * A contraction is a sequence of letters, so a digit cannot begin one.
+ *
+ * In the C locale, which orders by code point, every character is a class
+ * of its own.
+ */
+static bool cclequiv(int x, int y)
+{
+	return cclcoll(x, y, L'1', L'0') &&
+	    cclcoll(x, y, L'3', L'2');
+}
+
 int member(int c, int *sarg)	/* is c in s? */
 {
 	int *s = (int *) sarg;
 
-	while (*s)
+	/*
+	 * cgoto() calls member(HAT, x).  HAT is not a valid code point:
+	 * it belongs to no class, and must not be handed to wcscoll().
+	 */
+	if (c < 0 || c > MAX_CODE_POINT)
+		return(0);
+
+	while (*s) {
 		if (c == *s++)
 			return(1);
+
+		/*
+		 * cclex() marks a character written as an equivalence class
+		 * by following it with CCL_EQUIV.
+		 */
+		if (*s == CCL_EQUIV) {
+			if (cclequiv(c, s[-1]))
+				return(1);
+			s++;
+		}
+	}
+
 	return(0);
 }
 
@@ -1350,11 +1430,11 @@ static int repeat(const uschar *reptok, int reptoklen, const uschar *atom,
 }
 
 /*
- * Write a CCL_CLAMP or CCL_FENCE marker into a character class buffer as an
- * eight digit \u escape -- the form cclex() relies on below -- and return its
- * length, as snprintf() does.  A null buffer asks only for the length, which
- * is how the caller sizes its reservation.  Insufficient space in a buffer
- * that was given indicates a bug in that reservation.
+ * Write a CCL_CLAMP, CCL_FENCE or CCL_EQUIV marker into a character class
+ * buffer as an eight digit \u escape -- the form cclex() relies on below --
+ * and return its length, as snprintf() does.  A null buffer asks only for the
+ * length, which is how the caller sizes its reservation.  Insufficient space
+ * in a buffer that was given indicates a bug in that reservation.
  */
 static int
 cclmark(uschar *bp, uschar *buf, int bufsz, int marker)
@@ -1579,13 +1659,31 @@ static int cclex(void)
 				*bp++ = '\\';
 
 			/*
-			 * An equivalence class holding a single character is
-			 * that character, so write it into the class being
-			 * built.  Nothing here consults the locale.
+			 * Write the character, then mark it so cclenter()
+			 * keeps the mark and member() knows to compare
+			 * collation weights against it rather than only the
+			 * character.  The mark is an eight digit \u escape,
+			 * which is above MAX_CODE_POINT, exactly eight digits
+			 * so hexstr() stops on its own, and plain ASCII so it
+			 * reads the same at any awk_mb_cur_max.
 			 */
 			for (i = 0; i < n; i++)
 				*bp++ = *prestr++;
 			prestr += 2;
+
+			/*
+			 * Mark it only where it is a valid code point.  u8_rune()
+			 * decodes the four byte form without validating the result,
+			 * so it can yield a value that is not one and can have no
+			 * collation weight; cclenter() discards such a value, and a
+			 * mark left behind would attach itself to whatever came
+			 * before and make an equivalence class of that.  The
+			 * character itself is still written, so that the ] ending the
+			 * expression is seen as the terminator rather than as the
+			 * first member of an empty one.
+			 */
+			if (equiv_char <= MAX_CODE_POINT)
+				bp += cclmark(bp, buf, bufsz, CCL_EQUIV);
 		} else if (c == '\0') {
 			FATAL("nonterminated character class %.20s", lastre);
 		} else if (bp == buf) {	/* 1st char is special */
