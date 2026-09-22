@@ -236,7 +236,6 @@ extern	int	pairstack[], paircnt;
 #define NCHARS	(1256+3)		/* 256 handles 8-bit chars; 128 does 7-bit */
 				/* BUG: some overflows (caught) if we use 256 */
 				/* watch out in match(), etc. */
-#define	HAT	(NCHARS+2)	/* matches ^ in regular expr */
 #define NSTATES	32
 
 typedef struct rrow {
