@@ -233,6 +233,27 @@ gchk '[ac]'	abcabc	'4:+b++b+'	'every a and c replaced, not just the first of eac
 gchk '[ac]'	aXa	'2:+X+'	'a non-matching character between two matches'
 gchk '[ac]'	aaa	'3:+++'	'adjacent matches'
 
+gchk '[\u61[=c=]]'	abcABCabc61	'4:+b+ABC+b+61'	'C locale: \u61 is a, [=c=] is just c'
+
+# A [:class:] is not a range endpoint.  cclenter() reads the buffer back and
+# cannot otherwise tell a character the expansion emitted from one written on
+# its own, so a '-' beside a class used to make a range out of whichever
+# character the expansion happened to start or finish with, losing the hyphen
+# itself as well: [a[:digit:]-c] ran from '9' to 'c' and took in the
+# punctuation and capitals between them, while [a[:alpha:]-0] ran from the last
+# letter the locale has down to '0', an empty range, which cost it the '-' and
+# the '0'.  cclex() now fences the expansion off on whichever side a hyphen is
+# on, so the hyphen stays an ordinary member.  gawk agrees on the first two.
+# On the third it keeps only 'a', the capitals, '0' and '-', yet it agrees with
+# us on [[:alpha:]-0] and on [b[:alpha:]-0]; that inconsistency looks like a
+# gawk bug rather than a rule, so we do not follow it.
+#
+chk '[a[:digit:]-c]'	'ac0125789-'	'was a range from 9 to c'
+chk '[[:digit:]-c]'	'c0125789-'	'a class first in the expression; was a range from 9 to c'
+chk '[a[:alpha:]-0]'	"$ALPHA"'0-'	'was an empty range; lost the - and the 0'
+chk '[a-[:digit:]]'	'a0125789-'	'a class cannot end a range either; was 125789'
+chk '[0-[:alpha:]]'	"$ALPHA"'0-'	'a class cannot open a range either; had taken in the digits and punctuation up to A'
+
 # An escaped hyphen is a member, not a range separator.
 # gawk disagrees for the numeric spellings: it resolves \x2d and \055 before
 # the regexp parser runs, so there they act as separators.  onetrueawk treats
@@ -246,6 +267,21 @@ chk '[a\055f]'		'af-'		'became the range a-f'
 chk '[a\\]'		'a\'		'\ was dropped, and over-read past the buffer'
 chk '[\\n]'		'n\'		'became {newline}'
 chk '[\x5cn]'		'n\'		'gawk reads \x5c differently'
+
+# A width-bearing escape must not absorb a following class expansion.
+# quoted() reads up to 8 hex / 3 octal digits, so cclex() has to fence the
+# escape off from whatever the expansion puts next in the buffer.
+#
+chk '[\xa[.f.]]'	f		'was \xaf, so f did not match'
+chk '[\xa[.F.]]'	F		'was \xaF'
+chk '[\xa[.g.]]'	g		'g cannot extend a hex escape; needs no fence'
+chk '[\xa[=f=]]'	f		'gawk expands [=f=] to {f,F}; onetrueawk does not'
+chk '[\xa[:alpha:]]'	"$ALPHA"	'was \xaA, so A was dropped from the class'
+chk '[\1[.7.]]'		7		'was \17 (octal), so 7 did not match'
+chk '[\7[.7.]]'		7		'was \77'
+chk '[\1[.a.]]'		a		'a cannot extend an octal escape'
+chk '[\1[.f.]]'		f		'f cannot extend an octal escape'
+chk '[\1[:digit:]]'	"$DIGIT"	'was \101, i.e. A, so the digits were lost'
 
 # Character classes, for contrast.
 chk '[[:alpha:]]'	"$ALPHA"	''
