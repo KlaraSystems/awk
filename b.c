@@ -36,9 +36,18 @@ THIS SOFTWARE.
 
 /*
  * A value no input character can equal: u8_rune() only ever yields a
- * non-negative rune, and cgoto()'s other argument is HAT, also positive.
+ * non-negative rune.
  */
 #define NOT_A_CHAR      (-1)
+
+/*
+ * u8_rune() rejects a sequence that decodes above MAX_CODE_POINT, so a
+ * marker placed beyond it cannot be reached from input: cgoto() excludes
+ * HAT from DOT and NCCL, so an input rune equal to HAT would match
+ * neither, and a class holding it would match every line.
+ */
+#define HAT             (MAX_CODE_POINT + 1)
+
 
 #define MAXLIN 22
 
@@ -1413,39 +1422,59 @@ static int cclex(void)
 				}
 			}
 		} else if (c == '[' && *prestr == '.') {
-			char collate_char;
+			int collate_char;
 			prestr++;
-			collate_char = *prestr++;
-			if (*prestr == '.' && prestr[1] == ']') {
-				prestr += 2;
-				/* Found it: map via locale TBD: for
-				   now, simply return this char.  This
-				   is sufficient to pass conformance
-				   test awk.ex 156
-				 */
-				if (*prestr == ']') {
-					prestr++;
-					rlxval = collate_char;
-					return CHAR;
-				}
-			}
+
+			n = u8_rune(&collate_char, (const char *) prestr);
+
+			if (*prestr == '\0' || prestr[n] != '.' || prestr[n+1] != ']')
+				FATAL("invalid collating element: %s\n", lastre);
+
+			/*
+			 * Escape the dash character to prevent it from being
+			 * misinterpreted as a range separator by cclenter().
+			 * Escape the backslash character to allow a literal
+			 * backslash character as the collation element.
+			 */
+			if (collate_char == '\\' || collate_char == '-')
+				*bp++ = '\\';
+
+			/*
+			 * Only single-character collating elements are currently
+			 * supported, which POSIX defines as equivalent to the
+			 * character itself, so no locale lookup is needed.
+			 * Multi-character elements such as Spanish "ch" are
+			 * rejected above.
+			 */
+			for (i = 0; i < n; i++)
+				*bp++ = *prestr++;
+			prestr += 2;
 		} else if (c == '[' && *prestr == '=') {
-			char equiv_char;
+			int equiv_char;
 			prestr++;
-			equiv_char = *prestr++;
-			if (*prestr == '=' && prestr[1] == ']') {
-				prestr += 2;
-				/* Found it: map via locale TBD: for now
-				   simply return this char. This is
-				   sufficient to pass conformance test
-				   awk.ex 156
-				 */
-				if (*prestr == ']') {
-					prestr++;
-					rlxval = equiv_char;
-					return CHAR;
-				}
-			}
+
+			n = u8_rune(&equiv_char, (const char *) prestr);
+
+			if (*prestr == '\0' || prestr[n] != '=' || prestr[n+1] != ']')
+				FATAL("invalid collating element: %s\n", lastre);
+
+			/*
+			 * Escape the dash character to prevent it from being
+			 * misinterpreted as a range separator by cclenter().
+			 * Escape the backslash character to allow a literal
+			 * backslash character as an equivalence class.
+			 */
+			if (equiv_char == '\\' || equiv_char == '-')
+				*bp++ = '\\';
+
+			/*
+			 * An equivalence class holding a single character is
+			 * that character, so write it into the class being
+			 * built.  Nothing here consults the locale.
+			 */
+			for (i = 0; i < n; i++)
+				*bp++ = *prestr++;
+			prestr += 2;
 		} else if (c == '\0') {
 			FATAL("nonterminated character class %.20s", lastre);
 		} else if (bp == buf) {	/* 1st char is special */
@@ -1460,6 +1489,9 @@ static int cclex(void)
 		} else
 			*bp++ = c;
 	}
+
+	/* can't happen */
+	FATAL("can't happen: unexpected termination of cclex: %.20s", lastre);
 }
 
 int relex(void)		/* lexical analyzer for reparse */
@@ -1589,7 +1621,6 @@ int cgoto(fa *f, int s, int c)
 	int *p, *q;
 	int i, j, k;
 
-	/* assert(c == HAT || c < NCHARS);  BUG: seg fault if disable test */
 	while (f->accept >= maxsetvec) {	/* guessing here! */
 		resizesetvec(__func__);
 	}
