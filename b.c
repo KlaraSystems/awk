@@ -46,7 +46,9 @@ THIS SOFTWARE.
  * HAT from DOT and NCCL, so an input rune equal to HAT would match
  * neither, and a class holding it would match every line.
  */
-#define HAT             (MAX_CODE_POINT + 1)
+#define CCL_CLAMP       (MAX_CODE_POINT + 1)
+#define CCL_FENCE       (MAX_CODE_POINT + 2)
+#define HAT             (MAX_CODE_POINT + 3)
 
 
 #define MAXLIN 22
@@ -457,14 +459,27 @@ int *cclenter(const char *argp)	/* add a character class */
 
 		if (c == '\\') {
 			c = quoted(&p);
-		} else if (c == '-' && i > 0) {
+		} else if (c == '-' && i > 0 && bp[-1] != CCL_FENCE) {
 			if (*p != 0) {
 				c = bp[-1];
 				/* c2 = *p++; */
 				n = u8_rune(&c2, (const char *) p);
 				p += n;
-				if (c2 == '\\')
+				if (c2 == '\\') {
 					c2 = quoted(&p); /* BUG: sets p, has to be u8 size */
+
+					/*
+					 * If c2 is a fence then a class
+					 * expansion follows, which cannot
+					 * be used as a range endpoint.
+					 * Keep the hyphen as a member,
+					 * and drop the fence here.
+					 */
+					if (c2 == CCL_FENCE) {
+						c = '-';
+						goto store;
+					}
+				}
 
 				/*
 				 * Nothing above MAX_CODE_POINT can ever be matched,
@@ -499,6 +514,7 @@ int *cclenter(const char *argp)	/* add a character class */
 				continue;
 			}
 		}
+store:
 		if (i + 1 >= bufsz) {
 			bufsz *= 2;
 			buf = (int *) realloc(buf, bufsz * sizeof(int));
@@ -518,8 +534,9 @@ int *cclenter(const char *argp)	/* add a character class */
 
 	/*
 	 * Copy buf[] to retp[], dropping anything that is not a character:
-	 * NULs from \0 or a malformed \x, and values outside the Unicode
-	 * range from an oversized \u.
+	 * NULs from \0 or a malformed \x, values outside the Unicode range
+	 * from an oversized \u, and the fence cclex() inserts to keep a
+	 * following class expansion from being misread.
 	 */
 	for (i = j = 0; i < bp-buf+1; i++) {
 		if (buf[i] > 0 && buf[i] <= MAX_CODE_POINT)
@@ -1332,6 +1349,26 @@ static int repeat(const uschar *reptok, int reptoklen, const uschar *atom,
 	return 0;
 }
 
+/*
+ * Write a CCL_CLAMP or CCL_FENCE marker into a character class buffer as an
+ * eight digit \u escape -- the form cclex() relies on below -- and return its
+ * length, as snprintf() does.  A null buffer asks only for the length, which
+ * is how the caller sizes its reservation.  Insufficient space in a buffer
+ * that was given indicates a bug in that reservation.
+ */
+static int
+cclmark(uschar *bp, uschar *buf, int bufsz, int marker)
+{
+	int room = bp == NULL ? 0 : bufsz - (int) (bp - buf);
+	int n;
+
+	n = snprintf((char *) bp, room, "\\u%08x", marker);
+	if (n < 0 || (bp != NULL && n >= room))
+		FATAL("no room for a marker in reg expr %.10s...", lastre);
+
+	return n;
+}
+
 static int cclex(void)
 {
 	int c, n;
@@ -1340,6 +1377,8 @@ static int cclex(void)
 	static int bufsz = 100;
 	uschar *bp;
 	const struct charclass *cc;
+	int fence = 0;
+	int marklen;
 	int i;
 
 	if (buf == NULL && (buf = (uschar *) malloc(bufsz)) == NULL)
@@ -1354,14 +1393,16 @@ static int cclex(void)
 	n = 5 * strlen((const char *) prestr)+1; /* BUG: was 2.  what value? */
 	if (!adjbuf((char **) &buf, &bufsz, n, n, (char **) &bp, "cclex1"))
 		FATAL("out of space for reg expr %.10s...", lastre);
+	marklen = cclmark(NULL, NULL, 0, CCL_FENCE);
+
 	for (; ; ) {
-		int adjcnt = bp - buf + UCHAR_MAX + 2;
+		int adjcnt = bp - buf + UCHAR_MAX + (marklen * 2) + 2;
 
 		/*
 		 * Reserve room for the largest write any single pass can make.
 		 * A class expansion is the worst of them: every character up
 		 * to UCHAR_MAX, one more byte to escape the backslash among
-		 * them, and the terminator.
+		 * them, a fence on either side, and the terminator.
 		 */
 		if (!adjbuf((char **) &buf, &bufsz, adjcnt, 100, (char **) &bp, "cclex2"))
 			FATAL("out of space for reg expr %.10s...", lastre);
@@ -1369,6 +1410,7 @@ static int cclex(void)
 		if ((n = u8_rune(&rlxval, (const char *) prestr)) > 1) {
 			for (i = 0; i < n; i++)
 				*bp++ = *prestr++;
+			fence = 0;
 			continue;
 		}
 		if ((c = *prestr++) == '\\') {
@@ -1376,6 +1418,39 @@ static int cclex(void)
 			if ((c = *prestr++) == '\0')
 				FATAL("nonterminated character class %.20s...", lastre);
 			*bp++ = c;
+
+			if (c == 'u') {
+				const uschar *p = prestr - 1;
+				int x;
+
+				x = quoted(&p);
+				if (x > MAX_CODE_POINT) {
+					bp -= 2;	/* over the \u just written */
+					bp += cclmark(bp, buf, bufsz, CCL_CLAMP);
+					fence = 0;
+					prestr = p;
+					continue;
+				}
+			}
+
+			/*
+			 * cclenter() re-reads this buffer through quoted(), which
+			 * absorbs following digits into a preceding \x, \u or octal
+			 * escape: [\xa[:alpha:]] would read as \xaa.  Note the
+			 * escape's radix so the branches below can fence off an
+			 * expansion that begins with a digit of it, using
+			 * CCL_FENCE -- written as an eight digit \u escape, which
+			 * is above MAX_CODE_POINT so cclenter() discards it, exactly
+			 * eight digits so hexstr() stops on its own, and plain ASCII
+			 * so it reads the same at any awk_mb_cur_max.
+			 */
+			if (c == 'u' || c == 'x') {
+				fence = 16;
+			} else if (isoctdigit(c)) {
+				fence = 8;
+			} else {
+				fence = 0;
+			}
 		/* } else if (c == '\n') { */
 		/* 	FATAL("newline in character class %.20s...", lastre); */
 		} else if (c == '[' && *prestr == ':') {
@@ -1402,6 +1477,18 @@ static int cclex(void)
 			if (cc->cc_name == NULL)
 				FATAL("invalid character class name %.20s...", lastre);
 
+			/*
+			 * Fence the expansion off from a preceding escape,
+			 * which would otherwise swallow the first characters
+			 * it emits, and from a preceding hyphen, which
+			 * cclenter() would otherwise read as a range ending
+			 * at the first of them.  A class is not an endpoint.
+			 */
+			if (fence > 0 || (bp > buf && bp[-1] == '-')) {
+				bp += cclmark(bp, buf, bufsz, CCL_FENCE);
+				fence = 0;
+			}
+
 			prestr += cc->cc_namelen + 3;
 
 			/*
@@ -1421,6 +1508,14 @@ static int cclex(void)
 					*bp++ = i;
 				}
 			}
+
+			/*
+			 * Likewise on the right: a following hyphen would be
+			 * read as a range starting at the last character the
+			 * expansion emitted.
+			 */
+			if (*prestr == '-')
+				bp += cclmark(bp, buf, bufsz, CCL_FENCE);
 		} else if (c == '[' && *prestr == '.') {
 			int collate_char;
 			prestr++;
@@ -1429,6 +1524,14 @@ static int cclex(void)
 
 			if (*prestr == '\0' || prestr[n] != '.' || prestr[n+1] != ']')
 				FATAL("invalid collating element: %s\n", lastre);
+
+			if (fence > 0) {
+				if ((fence == 16 && isxdigit(*prestr)) ||
+				    (fence == 8 && isoctdigit(*prestr))) {
+					bp += cclmark(bp, buf, bufsz, CCL_FENCE);
+				}
+				fence = 0;
+			}
 
 			/*
 			 * Escape the dash character to prevent it from being
@@ -1458,6 +1561,14 @@ static int cclex(void)
 			if (*prestr == '\0' || prestr[n] != '=' || prestr[n+1] != ']')
 				FATAL("invalid collating element: %s\n", lastre);
 
+			if (fence > 0) {
+				if ((fence == 16 && isxdigit(*prestr)) ||
+				    (fence == 8 && isoctdigit(*prestr))) {
+					bp += cclmark(bp, buf, bufsz, CCL_FENCE);
+				}
+				fence = 0;
+			}
+
 			/*
 			 * Escape the dash character to prevent it from being
 			 * misinterpreted as a range separator by cclenter().
@@ -1486,8 +1597,14 @@ static int cclex(void)
 				return CCL;
 			else
 				return NCCL;
-		} else
+		} else {
+			if ((fence == 16 && !isxdigit(c)) ||
+			    (fence == 8 && !isoctdigit(c))) {
+				fence = 0;
+			}
+
 			*bp++ = c;
+		}
 	}
 
 	/* can't happen */
