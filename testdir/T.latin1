@@ -2,29 +2,69 @@ echo T.latin1: tests of 8-bit input
 
 awk=${awk-../a.out}
 
+# The same bytes are a character of their own in a single byte locale and an
+# ill-formed sequence in a UTF-8 one, where u8_rune() has to hand them back a
+# byte at a time.  Run everything under both rather than under whatever the
+# environment happens to set: where LANG is empty the locale is C, and the
+# multibyte half would never be reached.
+#
+# Ask locale(1) which are installed rather than writing names down.  BSD
+# calls them en_US.ISO8859-1 and en_US.UTF-8, glibc calls them
+# en_US.iso88591 and en_US.utf8, and which 8859 variants exist differs again;
+# a name that is not installed selects C, which would leave the single byte
+# case tested twice and the multibyte case not at all.  Only the 8859 and
+# UTF-8 codesets are considered: US-ASCII is single byte but has no character
+# for a high byte, and a bare en_US is 8859-1 on glibc and UTF-8 on BSD.  A
+# two byte answer for a two byte sequence says the locale is single byte, a
+# one byte answer says it is UTF-8.  C is the fallback for the single byte
+# case, being always present.
+#
+onebyte=C
+utf8=
+for loc in `locale -a 2>/dev/null | grep -iE '^en_US\.(iso8859|utf-?8)'`
+do
+	n=`printf '\303\251\n' | LC_ALL=$loc $awk '{ print length($0) }' 2>/dev/null`
+	if [ "x$n" = x2 ] && [ "x$onebyte" = xC ]
+	then
+		onebyte=$loc
+	elif [ "x$n" = x1 ] && [ -z "$utf8" ]
+	then
+		utf8=$loc
+	fi
+done
+
+if [ -z "$utf8" ]
+then
+	echo "	T.latin1: no UTF-8 locale found, multibyte half skipped"
+fi
+
+for locale in $onebyte $utf8
+do
+export LC_ALL=$locale
+
 $awk '
 { print $0 }
 ' latin1 >foo1
 
-diff latin1 foo1 || echo 'BAD: T.latin1 1'
+diff latin1 foo1 || echo "BAD: T.latin1 1 [$LC_ALL]"
 
 $awk '{ gsub(/\351/, "\370"); print }' latin1 >foo0
 $awk '{ gsub(/י/, "ר"); print }' latin1 >foo1
-diff foo0 foo1 || echo 'BAD: T.latin1 3'
+diff foo0 foo1 || echo "BAD: T.latin1 3 [$LC_ALL]"
 
 $awk '{ gsub(/[^\300-\370]/, ""); print }' latin1 >foo0
 $awk '{ gsub(/[^ְ-ר]/, ""); print } ' latin1 >foo1
-diff foo0 foo1 || echo 'BAD: T.latin1 4'
+diff foo0 foo1 || echo "BAD: T.latin1 4 [$LC_ALL]"
 
 echo  '/ב/' >foo1
 $awk -f foo1 foo1 >foo2
 
-diff foo1 foo2 || echo 'BAD: T.latin1 5'
+diff foo1 foo2 || echo "BAD: T.latin1 5 [$LC_ALL]"
 
 
 echo /[בי]/ >foo1
 $awk -f foo1 foo1 >foo2
-diff foo1 foo2 || echo 'BAD: T.latin1 6'
+diff foo1 foo2 || echo "BAD: T.latin1 6 [$LC_ALL]"
 
 
 echo 'This is a line.
@@ -34,4 +74,5 @@ This is another line.' >foo0
 echo 'Patterns like /[בי]/ do not work yet. Example, run awk /[בי]/
 over a file containing just ב.' >foo1
 $awk '/[בי]/' foo0 >foo2
-diff foo1 foo2 || echo 'BAD: T.latin1 7'
+diff foo1 foo2 || echo "BAD: T.latin1 7 [$LC_ALL]"
+done
