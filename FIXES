@@ -26,6 +26,31 @@ This file lists all bug fixes, changes, etc., made since the
 second edition of the AWK book was published in September 2023.
 
 Sep 29, 2026
+	More bracket expression fixes in b.c.  Collating elements and
+	equivalence classes work anywhere in a class rather than only
+	when they make up the whole of one, and both spellings failed
+	the same way: the character was dropped and the rest of the
+	class kept, so [a[.b.]c] did not match the b, and where the
+	form came last the whole class collapsed to that one character,
+	so [ab[=c=]] matched only the c.  [^[.x.]] lost its negation,
+	and neither could end a range.  An invalid class name is a
+	syntax error now, as in gawk, rather than quietly accepted.
+
+	Three out of bounds accesses while lexing a class are fixed as
+	well, silent in the same way as the two above: writes that a
+	[:class:] expansion could carry past the end of the buffer, an
+	over-read where a truncated [. or [= had no terminator to find,
+	and another where a backslash was the last byte of the class.
+
+	HAT, the marker for ^ in a class, was NCHARS+2 == U+04ED, an
+	ordinary Cyrillic letter, so that one character matched neither
+	/./ nor any negated class while a class holding it matched
+	every line.  The values b.c reserves for itself now sit above
+	the last code point.
+
+	More tests in testdir/T.ccl and testdir/T.utfre.
+
+Sep 29, 2026
 	Bracket expression fixes in b.c.  A class left with no members
 	matches nothing instead of everything, an empty one being how
 	the parser represents the empty regular expression: /[\0]/ and
