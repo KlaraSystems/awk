@@ -26,6 +26,19 @@ This file lists all bug fixes, changes, etc., made since the
 second edition of the AWK book was published in September 2023.
 
 Sep 29, 2026
+	A class expansion is no longer greedily consumed by a preceding
+	\x, \u or octal escape; [\xa[:alpha:]] was read as \xaa.
+
+	A '-' beside a [:class:] is an ordinary member and not a range, a
+	class being no more an endpoint than it is a character:
+	[a[:digit:]-c] ran from '9' to 'c' and included the punctuation and
+	capitals between them, while [a-[:digit:]] lost both the 'a' and
+	the '0'.  A collating element, being a single character, may still
+	end a range.
+
+	More tests in testdir/T.ccl.
+
+Sep 29, 2026
 	More bracket expression fixes in b.c.  Collating elements and
 	equivalence classes work anywhere in a class rather than only
 	when they make up the whole of one, and both spellings failed
