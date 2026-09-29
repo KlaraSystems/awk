@@ -26,6 +26,23 @@ This file lists all bug fixes, changes, etc., made since the
 second edition of the AWK book was published in September 2023.
 
 Sep 29, 2026
+	Bracket expression fixes in b.c.  A class left with no members
+	matches nothing instead of everything, an empty one being how
+	the parser represents the empty regular expression: /[\0]/ and
+	/[\x]/ matched every line.  A NUL is allowed as the left end of
+	a range.  An endpoint past the last code point is clamped
+	rather than expanded, which used to ask for millions of members
+	and overflow bufsz on the way.
+
+	Two defects that only a checking tool shows: the terminator of
+	the member array was written one element past the allocation
+	whenever a class held exactly bufsz members, and the
+	accumulator reading \u overflowed a signed int.  An ordinary
+	malloc hides the first, since the element is read straight back.
+
+	New tests in testdir/T.ccl and testdir/T.utfre.
+
+Sep 29, 2026
 	u8_rune() no longer attempts to decode bytes in a multibyte
 	locale that is not utf-8.  Any pair of bytes in such an encoding
 	that was accidentally well formed utf-8 was decoded into an
