@@ -25,6 +25,16 @@ THIS SOFTWARE.
 This file lists all bug fixes, changes, etc., made since the 
 second edition of the AWK book was published in September 2023.
 
+Sep 29, 2026
+	fnematch() kept awk_mb_cur_max bytes of lookahead while
+	u8_rune() reads up to four, so if awk_mb_cur_max was less than
+	four then a four byte utf-8 sequence in the input was decoded
+	partly from bytes past the logical end of the buffer.  For
+	example, with U+10000 as RS, ja_JP.SJIS and ja_JP.eucJP read a
+	two record file as one.
+
+	New test in testdir/T.rslookahead.
+
 Sep 24, 2026
 	u8_rune() no longer accepts a sequence that encodes no
 	character: one above the last code point, a utf-16 surrogate, or
