@@ -26,6 +26,18 @@ This file lists all bug fixes, changes, etc., made since the
 second edition of the AWK book was published in September 2023.
 
 Sep 29, 2026
+	Equivalence classes now come from the locale's collation.
+	[=x=] stood for x and nothing else, which is all the C locale
+	has, but a locale with collation weights means more by it:
+	[[=a=]] reaches A and the accented forms as well.  main() sets
+	LC_COLLATE, without which every class holds one character.
+
+	New tests in testdir/T.ccl, testdir/T.allunicodechars and
+	testdir/T.allmbchars; the cases that depend on collation skip
+	rather than pass where no installed locale can show what they
+	test.
+
+Sep 29, 2026
 	A class expansion is no longer greedily consumed by a preceding
 	\x, \u or octal escape; [\xa[:alpha:]] was read as \xaa.
 
