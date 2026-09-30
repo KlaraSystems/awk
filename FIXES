@@ -26,6 +26,16 @@ This file lists all bug fixes, changes, etc., made since the
 second edition of the AWK book was published in September 2023.
 
 Sep 29, 2026
+	u8_rune() no longer attempts to decode bytes in a multibyte
+	locale that is not utf-8.  Any pair of bytes in such an encoding
+	that was accidentally well formed utf-8 was decoded into an
+	unrelated character.  For example, 1920 of GB18030's two byte
+	characters were read as one character rather than two bytes, and
+	incorrectly: d2 bb is U+4E00, which awk decoded as U+04BB.
+
+	New test in testdir/T.nonutf8.
+
+Sep 29, 2026
 	fnematch() kept awk_mb_cur_max bytes of lookahead while
 	u8_rune() reads up to four, so if awk_mb_cur_max was less than
 	four then a four byte utf-8 sequence in the input was decoded
