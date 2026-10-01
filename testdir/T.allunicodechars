@@ -96,9 +96,10 @@ fi
 # each candidate is asked before it is used.  Asking is the whole test of
 # whether a name is usable, since a locale that is not installed leaves the
 # collation at C, where [=a=] reaches only a.  At most NCOLL are taken, since
-# each costs a full pass over the generated file and a second locale of the
-# same shape adds little.  en_US comes last because it is the one most likely
-# to be the only one installed, so the others are preferred where they exist.
+# each costs a full pass over the generated file and a second locale that
+# groups the same characters together adds little.  en_US comes last because it
+# is the one most likely to be the only one installed, so the others are
+# preferred where they exist.
 #
 NCOLL=3
 collating=
